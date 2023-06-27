@@ -1,17 +1,13 @@
 library(shiny)
-library(shinydashboard)
 library(vroom)
 library(DT)
 
 ## global variables
-version_number = 'v1.0.0'
 df.example = read.table("./example_DMS.txt", header = T, sep = "\t")
-df.funsum_all = readRDS("./funsum_081722.rds")
+ls.funsum_all = readRDS("./funsum.rds")
 df.NSFP_all = read.table("./dfNFSP_031022.txt", header = T, sep = "\t")
 df.NSFP_all$aaref[which(df.NSFP_all$aaref == "X")] = "*"
 df.NSFP_all$aaalt[which(df.NSFP_all$aaalt == "X")] = "*"
-
-df.clinvar_all = readRDS("./clinvar_df_012523.rds")
 example_txt = paste(apply(df.example[1:5,], MARGIN = 1, FUN = paste, collapse="\t"), collapse = "\n")
 score_types = c("norm_raw_score", "pos_score", "sub_score", "final_score")
 score_names = c("Normalized DMS score", "FUNSUM positional score", "FUNSUM substitution score", "FUNSUM final score")
@@ -207,123 +203,41 @@ draw_validation_plot <- function(df.NSFP, score_types){
   }
 }
 
-draw_variant_ggplot <- function(df.NSFP, score_type, show_legend=T, show_stat=T){
-  require(hrbrthemes)
-  if (score_type %in% colnames(df.NSFP)){
-    df.NSFP2 = df.NSFP %>% filter(!is.na(cs_simple) & !is.na(df.NSFP[[score_type]]))
-    
-    score_g1 = df.NSFP2[[score_type]][df.NSFP2$cs_simple == "b"]
-    score_g2 = df.NSFP2[[score_type]][df.NSFP2$cs_simple == "p"]
-    
-    if (length(score_g1)>0 & length(score_g2)>0){
-      res = ks.test(x = score_g1, y = score_g2, alternative = "greater") # KS-test
-      p1 = format(res$p.value, digits = 3)
-      res = wilcox.test(x = score_g1, y = score_g2, alternative = "less") # KS-test
-      p2 = format(res$p.value, digits = 3)
-    }
-    
-    plt <- ggplot(data = df.NSFP2, aes(x=.data[[score_type]], group=cs_simple, fill=cs_simple)) + 
-      geom_density(alpha=0.5, show.legend = show_legend) + 
-      scale_x_continuous(name="Functional score", limits=c(-3.5,3.5)) +
-      scale_y_continuous(name="Density", limits=c(0,1)) + 
-      scale_fill_manual(values = c("blue", "red"), name = "Clinvar", labels=c('Benign/Likely Benign', 'Pathogenic/Likely Pathogenic')) + 
-      theme_ipsum()
-    
-    if (show_stat){
-      plt <- plt + annotate("text", x=0, y=1, label= paste0("b=", length(score_g1), ", p=", length(score_g2), ", KS p=", p1, ", MW p=", p2))
-    }
-    
-    return(plt)
-  } else {
-    simpleError("score_type not found in df.NSFP!")
-  }
-}
-
 
 
 # Define UI for application
-ui <- dashboardPage(
-  dashboardHeader(title = "FUSE"), # Functional Substitution Estimation
-  dashboardSidebar(
-    sidebarMenu(
-      menuItem("About", tabName = "intro", icon = icon("circle-info")),
-      menuItem("Online tool", tabName = "tool", icon = icon("magnifying-glass-chart"))
+ui <- fluidPage(
+  
+  # Application title
+  titlePanel("FUSE: Functional Substitution Estimation"),
+  
+  fluidRow(
+    column(width = 5, 
+           textAreaInput(inputId = "txt_1", label = "Input DMS data", placeholder = example_txt, value = "", height='200px', width = '100%'),
+           actionButton(inputId = "btn_1", label = "Load example", width = '150px'),
+           actionButton(inputId = "btn_2", label = "Clear", width = '150px'),
+           br(), br(),
+           fileInput(inputId = "file_1", label = "Upload DMS data (.csv/.tsv)", multiple = F, accept = c(".csv", ".tsv")),
+           hr(),
+           radioButtons(inputId = "radio_1", label = "Method to calculate positional component", choices = list("FUNSUM" = "funsum", "James-Stein" = "js", "Median" = "median", "Mean" = "mean")),
+           radioButtons(inputId = "radio_2", label = "Include stop-codon substitutions?", choices = list("Yes"=T, "No"=F)),
+           radioButtons(inputId = "radio_3", label = "Validation data source", choices = c("ClinVar", "Other")),
+           hr(),
+           actionButton(inputId = "btn_3", label = "De-noise DMS data", width = '150px'), br(),br(),
+           verbatimTextOutput(outputId = "msg_1"),
+    ),
+    column(width = 7,
+           tabsetPanel(
+             tabPanel(title = "Data output", br(), br(),
+                      DTOutput("tb_1")),
+             tabPanel(title = "Visualization", br(), br(),
+                      selectInput(inputId = "select_1", label = "Gene to visualize", choices = c("None")),
+                      checkboxInput(inputId = "checkbox_1", label = "Use only the variants avaliable in original DMS data", value = F),
+                      plotOutput(outputId = "plot_1"))
+           )
     )
   ),
-  dashboardBody(
-    tabItems(
-      # First tab content
-      tabItem(tabName = "intro",
-              h2(HTML('<b>Fu</b>nctional <b>S</b>ubstitution <b>E</b>stimation (<b>FUSE</b>)')),
-              span(version_number),
-              br(),
-              h4(HTML('<b>About</b>')),
-              p(HTML('Read the full manuscript <a ref="https://www.medrxiv.org/content/10.1101/2023.01.06.23284280v1">here</a>.')),
-              br(),
-              h4(HTML('<b>Abstract</b>')),
-              imageOutput("image1"),
-              p(HTML('Deep mutational scanning assays enable the functional assessment of variants in high throughput. 
-                     Phenotypic measurements from these assays are broadly concordant with clinical outcomes but are prone to noise at the individual variant level. 
-                     We develop a framework to exploit related measurements within and across experimental assays to jointly estimate variant impact. 
-                     Drawing from a large corpus of deep mutational scanning data, we collectively estimate the mean functional effect per AA residue position within each gene, normalize observed functional effects by substitution type, and make estimates for individual allelic variants with a pipeline called FUSE (Functional Substitution Estimation). 
-                     FUSE improves the correlation of functional screening datasets covering the same variants, better separates estimated functional impacts for known pathogenic and benign variants (ClinVar <i>BRCA1</i>, p=2.24x10<sup>-51</sup>), and increases the number of variants for which predictions can be made (2,741 to 10,347) by inferring additional variant effects for substitutions not experimentally screened. 
-                     For UK Biobank patients who carry a rare variant in <i>TP53</i>, FUSE significantly improves the separation of patients who develop cancer syndromes from those without cancer (p=1.77x10<sup>-6</sup>). 
-                     These approaches promise to improve estimates of variant impact and broaden the utility of screening data generated from functional assays.')),
-              br(),
-              h4(HTML('<b>Disclaimer</b>')),
-              p(HTML('The information presented is strictly for research use only, and should not be construed or used as a substitute for professional medical advice or diagnosis. We encourage you to share any information you find relevant with a trained medical professional, including results from this site, manuscript, or accompanying software tools and downloads. This application, software tools, and accompanying downloads are released under the Creative Commons non-commercial use license.')),
-              p(HTML('<a href="https://creativecommons.org/licenses/by-nc-nd/4.0/"><img alt="License: CC BY-NC-ND 4.0" src="https://licensebuttons.net/l/by-nc-nd/4.0/80x15.png"></a>')),
-              br(),
-              h4(HTML('<b>Contact</b>')),
-              p(HTML('Please direct comments or questions to tyu7@bwh[dot]harvard[dot]edu.'))
-              
-      ),
-      
-      # Second tab content
-      tabItem(tabName = "tool",
-              fluidRow(
-                column(width = 5, 
-                       textAreaInput(inputId = "txt_1", label = "Input functional data", placeholder = example_txt, value = "", height='200px', width = '100%'),
-                       actionButton(inputId = "btn_1", label = "Load example", width = '150px'),
-                       actionButton(inputId = "btn_2", label = "Clear", width = '150px'),
-                       br(), br(),
-                       fileInput(inputId = "file_1", label = "Upload DMS data (.csv/.tsv)", multiple = F, accept = c(".csv", ".tsv")),
-                       hr(),
-                       radioButtons(inputId = "radio_1", label = "Method to calculate positional component", choices = list("FUNSUM" = "funsum", "James-Stein" = "js", "Median" = "median", "Mean" = "mean")),
-                       # radioButtons(inputId = "radio_2", label = "Include stop-codon substitutions?", choices = list("Yes"=T, "No"=F)),
-                       # radioButtons(inputId = "radio_3", label = "Validation data source", choices = c("ClinVar", "Other")),
-                       hr(),
-                       actionButton(inputId = "btn_3", label = "Estimate functional scores", width = '250px'), br(),br(),
-                       verbatimTextOutput(outputId = "msg_1"),
-                ),
-                column(width = 7,
-                       tabsetPanel(
-                         tabPanel(title = "Data output", br(), br(),
-                                  DTOutput("tb_1")),
-                         tabPanel(title = "Visualization", br(), br(),
-                                  selectInput(inputId = "select_1", label = "Gene to visualize", choices = c("None")),
-                                  checkboxInput(inputId = "checkbox_1", label = "Use only the variants avaliable in original DMS data", value = F),
-                                  plotOutput(outputId = "plot_1"))
-                       )
-                )
-              )
-      )
-    )
-    
-    
-    
-  )
 )
-
-
-
-# ui <- fluidPage(
-#   
-#   # Application title
-#   titlePanel("FUSE: Functional Substitution Estimation"),
-#   
-#   
-# )
 
 # Define server logic 
 server <- function(input, output, session) {
@@ -358,12 +272,12 @@ server <- function(input, output, session) {
   # })
   
   observeEvent(input$btn_3, {
-    # ## choose FUNSUM matrix
-    # if(input$radio_2){
-    #   df.funsum_all = ls.funsum_all$with_stop
-    # } else {
-    #   df.funsum_all = ls.funsum_all$no_stop
-    # }
+    ## choose FUNSUM matrix
+    if(input$radio_2){
+      df.funsum_all = ls.funsum_all$with_stop
+    } else {
+      df.funsum_all = ls.funsum_all$no_stop
+    }
     
     ## load table
     check_input = F
@@ -400,11 +314,11 @@ server <- function(input, output, session) {
         }
       }
       
-      # ## remove stop-codon substitutions if choose to not include stop-codon
-      # if (input$radio_2 == F){
-      #   ind = which(df_all$aaref != "*" & df_all$aaalt != "*")
-      #   df_all = df_all[ind,]
-      # }
+      ## remove stop-codon substitutions if choose to not include stop-codon
+      if (input$radio_2 == F){
+        ind = which(df_all$aaref != "*" & df_all$aaalt != "*")
+        df_all = df_all[ind,]
+      }
       
       if (check_input){
         gene_ids = unique(df_all$gene)
@@ -499,12 +413,6 @@ server <- function(input, output, session) {
     }
     output$msg_1 <- renderText({paste(msg, collapse = "\n")})
   })
-  
-  # Send a pre-rendered image, and don't delete the image after sending it
-  output$image1 <- renderImage({
-    filename <- normalizePath(file.path('www/images/graphical_abstract.png'))
-    list(src = filename, contentType = "png", alt = 'Graphical abstract', height = '400px')
-  }, deleteFile = FALSE)
 }
 
 # Run the application 
