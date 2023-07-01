@@ -1,12 +1,16 @@
 library(shiny)
 library(shinydashboard)
+library(tidyverse)
+library(patchwork)
+library(hrbrthemes)
 library(vroom)
 library(DT)
 
+
 ## global variables
-version_number = 'v1.0.0'
+version_number = 'v1.0.1'
 df.example = read.table("./example_DMS.txt", header = T, sep = "\t")
-df.funsum_all = readRDS("./funsum_081722.rds")
+df.funsum_all = readRDS("./funsum_maveDB_042423.rds")
 df.NSFP_all = read.table("./dfNFSP_031022.txt", header = T, sep = "\t")
 df.NSFP_all$aaref[which(df.NSFP_all$aaref == "X")] = "*"
 df.NSFP_all$aaalt[which(df.NSFP_all$aaalt == "X")] = "*"
@@ -56,43 +60,56 @@ parse_text_input <- function(text_input){
   return(df_all)
 }
 
-de_noise <- function(df, pos_mean_method, df.funsum, sd_norm = T){
-  ## need to add test for direction
+de_noise <- function(df, pos_mean_method, df.funsum, include_LOF = T, show_func_class=F){
+  # filter out row without amino acid changes
+  ind = which(!is.na(df$aaref) & !is.na(df$aaalt))
+  df = df[ind,]
   
-  gene_id = unique(df$gene)
-  aa_list = colnames(df.funsum)
-  df.sub_tb = funsum_to_subTable(df.funsum) #convert FUNSUM to tabular format
-  df$aa_str = paste0(df$aaref, df$aapos, df$aaalt)
-  df$aa_pair = paste0(df$aaref, df$aaalt)
-  
-  ## normalize the data by sd
-  if (sd_norm){
-    df$norm_raw_score = (df$raw_score-median(df$raw_score, na.rm = T))/sd(df$raw_score, na.rm = T)
+  if (include_LOF){
+    aa_list = unlist(strsplit("RHKDESTNQCGPAVILMFYW*", split = ""))
+  } else {
+    aa_list = unlist(strsplit("RHKDESTNQCGPAVILMFYW", split = ""))
+    ind = which((df$aaref != "*") & (df$aaalt != "*"))
+    df = df[ind,]
   }
+  df.sub_tb = funsum_to_subTable(df.funsum) #convert FUNSUM to tabular format
+  
+  if (is.null(df[["gene"]])){
+    df[["gene"]] = "gene"
+  }
+  df$gene_aa_str = paste0(df$gene, "---", df$aaref, df$aapos, df$aaalt)
+  
+  # collapse rows with the same amino acid substitutions
+  df = df %>% group_by(gene_aa_str) %>%
+    summarise(gene = unique(gene), aapos = unique(aapos), aaref = unique(aaref), aaalt = unique(aaalt), 
+              raw_score = mean(raw_score), norm_raw_score = mean(norm_raw_score))
   
   ## calculate positional component
-  df.pos_score = data.frame(aapos = unique(df$aapos), aaref = NA, pos_mean = NA)
+  df.pos_score = df %>% group_by(gene, aapos) %>% summarise(aaref = unique(aaref), pos_mean = NA)
+  df.pos_score$gene_aapos = paste0(df.pos_score$gene, "---", df.pos_score$aapos)
+  
   temp = matrix(NA, nrow = nrow(df.pos_score), ncol = length(aa_list))
   colnames(temp) <- aa_list
+  if (pos_mean_method == "funsum"){
+    temp2 = matrix(NA, nrow = nrow(df.pos_score), ncol = length(aa_list))
+    colnames(temp2) <- aa_list
+  }
   
-  df.out = c()
+  # pb = txtProgressBar(min = 1, max = nrow(df.pos_score), initial = 1, style = 3) 
   for (i in 1:nrow(df.pos_score)){
-    ind = which(df$aapos == df.pos_score$aapos[i])
-    df.pos_score$aaref[i] = unique(df$aaref[ind])
+    ind = which(df$gene == df.pos_score$gene[i] & df$aapos == df.pos_score$aapos[i])
     ind2 = df$aaalt[ind] %in% aa_list
     temp[i, df$aaalt[ind[ind2]]] = df$norm_raw_score[ind[ind2]]
     
     # calculate pos_mean by funsum method
     if (pos_mean_method == "funsum"){
       ind = which(!is.na(temp[i,]))
-      temp2 = temp[i,ind] - df.funsum[df.pos_score$aaref[i], aa_list[ind]]
-      df.pos_score$pos_mean[i] = mean(as.numeric(temp2))
+      temp2[i,ind] = temp[i,ind] - df.funsum[df.pos_score$aaref[i], aa_list[ind]]
     }
     
-    ## construct a new df with all possible substitutions
-    df.temp = data.frame(aapos = df.pos_score$aapos[i], aaref = df.pos_score$aaref[i], aaalt = aa_list)
-    df.out = rbind(df.out, df.temp)
+    # setTxtProgressBar(pb,i)
   }
+  # close(pb)
   
   # calculate pos_mean by other methods
   if (pos_mean_method == "mean"){
@@ -101,23 +118,46 @@ de_noise <- function(df, pos_mean_method, df.funsum, sd_norm = T){
     df.pos_score$pos_mean = apply(temp, 1, FUN = median, na.rm = T)
   } else if (pos_mean_method == "js"){
     df.pos_score$pos_mean = get_js(t(temp))
-  } 
+  } else if (pos_mean_method == "funsum"){
+    df.pos_score$pos_mean = get_js(t(temp2))
+  }
+  
+  ## construct a new df with all possible substitutions
+  df.out = df.pos_score %>% dplyr::select(gene, aapos, aaref) %>% 
+    dplyr::slice(rep(1:n(), each = length(aa_list)))
+  df.out$aaalt = rep(aa_list, nrow(df.pos_score))
+  
+  # assign functional class
+  if (show_func_class){
+    df.out$functional_class = NA
+    ind = which(df.out$aaref != df.out$aaalt & df.out$aaalt != '*')
+    df.out$functional_class[ind] = "MIS"
+    ind = which(df.out$aaref != "*" & df.out$aaalt == "*")
+    df.out$functional_class[ind] = "LOF"
+    ind = which(df.out$aaref == df.out$aaalt)
+    df.out$functional_class[ind] = "SYN"
+  }
   
   # assign norm_score, pos_score, sub_score to df.out
-  df.out$aa_str = paste0(df.out$aaref, df.out$aapos, df.out$aaalt)
+  df.out$gene_aa_str = paste0(df.out$gene, "---", df.out$aaref, df.out$aapos, df.out$aaalt)
+  df.out$gene_aapos = paste0(df.out$gene, "---", df.out$aapos)
   df.out$aa_pair = paste0(df.out$aaref, df.out$aaalt)
-  ind = match(df.out$aa_str, table = df$aa_str)
+  ind = match(df.out$gene_aa_str, table = df$gene_aa_str)
   df.out$raw_score = df$raw_score[ind]
   df.out$norm_raw_score = df$norm_raw_score[ind]
-  ind = match(df.out$aapos, table = df.pos_score$aapos)
+  ind = match(df.out$gene_aapos, table = df.pos_score$gene_aapos)
   df.out$pos_score = df.pos_score$pos_mean[ind]
   ind = match(df.out$aa_pair, table = df.sub_tb$aa_pair)
   df.out$sub_score = df.sub_tb$score[ind]
   df.out$final_score = df.out$pos_score + df.out$sub_score
-  df.out = cbind(gene = gene_id, df.out)
+  df.out$final_score_lite = df.out$final_score
+  ind = which(is.na(df.out$norm_raw_score))
+  df.out$final_score_lite[ind] = NA
   
   return(df.out)
 }
+
+
 
 check_DMS_input <- function(df){
   aa_list = unlist(strsplit("RHKDESTNQCGPAVILMFYW*", split = ""))
@@ -262,13 +302,14 @@ ui <- dashboardPage(
               br(),
               h4(HTML('<b>Abstract</b>')),
               imageOutput("image1"),
-              p(HTML('Deep mutational scanning assays enable the functional assessment of variants in high throughput. 
-                     Phenotypic measurements from these assays are broadly concordant with clinical outcomes but are prone to noise at the individual variant level. 
-                     We develop a framework to exploit related measurements within and across experimental assays to jointly estimate variant impact. 
-                     Drawing from a large corpus of deep mutational scanning data, we collectively estimate the mean functional effect per AA residue position within each gene, normalize observed functional effects by substitution type, and make estimates for individual allelic variants with a pipeline called FUSE (Functional Substitution Estimation). 
-                     FUSE improves the correlation of functional screening datasets covering the same variants, better separates estimated functional impacts for known pathogenic and benign variants (ClinVar <i>BRCA1</i>, p=2.24x10<sup>-51</sup>), and increases the number of variants for which predictions can be made (2,741 to 10,347) by inferring additional variant effects for substitutions not experimentally screened. 
-                     For UK Biobank patients who carry a rare variant in <i>TP53</i>, FUSE significantly improves the separation of patients who develop cancer syndromes from those without cancer (p=1.77x10<sup>-6</sup>). 
-                     These approaches promise to improve estimates of variant impact and broaden the utility of screening data generated from functional assays.')),
+              p(HTML('Deep mutational scanning enables the functional assessment of variants in high throughput. 
+                     Phenotypic measurements from these assays are broadly concordant with clinical outcomes, but are prone to noise at the variant level. 
+                     We develop a framework to make use of related measurements within and across experimental assays to jointly estimate variant impacts. 
+                     Drawing from a large corpus of deep mutational scanning data, we collectively estimate the mean functional effect per AA residue position within each gene, normalize the observed functional effects by substitution type, and make estimates for individual allelic variants with a pipeline called <b>FUSE</b> (<b>FU</b>nctional <b>S</b>ubstitution <b>E</b>stimation). 
+                     FUSE improves the correlation of functional screening datasets covering the same variants, significantly separates the estimated functional impacts of known pathogenic and benign missense variants across 9 genes (ClinVar, p=1.8x10<sup>-69</sup>), and improves classification accuracy. 
+                     FUSE increases the number of variants for which predictions can be made by imputing variant effects for substitutions not experimentally screened. 
+                     For UK Biobank patients with a rare missense variant in <i>BRCA1</i>, FUSE significantly separates patients with breast cancer from those without cancer (p=2.2x10<sup>-5</sup>). 
+                     This approach promises to improve estimates of variant impact and broaden the utility of screening data generated from functional assays.')),
               br(),
               h4(HTML('<b>Disclaimer</b>')),
               p(HTML('The information presented is strictly for research use only, and should not be construed or used as a substitute for professional medical advice or diagnosis. We encourage you to share any information you find relevant with a trained medical professional, including results from this site, manuscript, or accompanying software tools and downloads. This application, software tools, and accompanying downloads are released under the Creative Commons non-commercial use license.')),
@@ -502,7 +543,7 @@ server <- function(input, output, session) {
   
   # Send a pre-rendered image, and don't delete the image after sending it
   output$image1 <- renderImage({
-    filename <- normalizePath(file.path('www/images/graphical_abstract.png'))
+    filename <- normalizePath(file.path('www/images/graphical_abstract_v2.png'))
     list(src = filename, contentType = "png", alt = 'Graphical abstract', height = '400px')
   }, deleteFile = FALSE)
 }
