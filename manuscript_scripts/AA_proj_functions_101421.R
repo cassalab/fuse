@@ -11,7 +11,7 @@ add.alpha <- function(col, alpha=1){
 
 get_KS_pval <-  function(x, y, alternative = "greater"){
   require(reticulate)
-  use_condaenv("r-reticulate")
+  use_condaenv("base")
   x = x[!is.na(x)]
   y = y[!is.na(y)]
   
@@ -26,7 +26,7 @@ get_KS_pval <-  function(x, y, alternative = "greater"){
 
 get_MW_pval <-  function(x, y, alternative = "less"){
   require(reticulate)
-  use_condaenv("r-reticulate")
+  use_condaenv("base")
   x = x[!is.na(x)]
   y = y[!is.na(y)]
   
@@ -231,7 +231,57 @@ get_norm_score <-  function(df, pos_mean_method, pos_norm = T, sd_norm = T, inve
   return(df.out)
 }
 
-
+pivot_norm_score <-  function(df, pos_mean_method, include_LOF=F, score_type="norm_raw_score", df.funsum_all=NULL){
+  if (include_LOF){
+    aa_list = unlist(strsplit("RHKDESTNQCGPAVILMFYW*", split = ""))
+  } else {
+    aa_list = unlist(strsplit("RHKDESTNQCGPAVILMFYW", split = ""))
+  }
+  
+  ind = which((df$aaref %in% aa_list) & (df$aaalt %in% aa_list))
+  df = df[ind,]
+  
+  df.out = data.frame(aapos = unique(df$aapos), aaref = NA, pos_mean = NA)
+  temp = matrix(NA, nrow = nrow(df.out), ncol = length(aa_list))
+  colnames(temp) <- aa_list
+  
+  for (i in 1:nrow(df.out)){
+    ind = which(df$aapos == df.out$aapos[i])
+    df.out$aaref[i] = unique(df$aaref[ind])[1]
+    ind2 = df$aaalt[ind] %in% aa_list
+    temp[i, df$aaalt[ind[ind2]]] = df[[score_type]][ind[ind2]]
+  }
+  
+  if (pos_mean_method == "mean"){
+    df.out$pos_mean = rowMeans(temp, na.rm = T)
+  } else if (pos_mean_method == "median"){
+    df.out$pos_mean = apply(temp, 1, FUN = median, na.rm = T)
+  } else if (pos_mean_method == "js"){
+    df.out$pos_mean = get_js(t(temp))
+  } else if (pos_mean_method == "funsum"){
+    if (is.null(df.funsum_all)){
+      df.funsum_all = readRDS(paste0("./shiny_app/DMS_denoiser/funsum_maveDB_042423.rds"))
+    }
+    if (!include_LOF){
+      df.funsum_all = df.funsum_all[aa_list, aa_list]
+    }
+    
+    pos_mean_all = c()
+    for (i in 1:nrow(temp)){
+      aaref = df.out$aaref[i]
+      pos_mean = NA
+      ind = which(!is.na(temp[i,]))
+      temp2 = temp[i,ind] - df.funsum_all[aaref, aa_list[ind]]
+      pos_mean = mean(as.numeric(temp2))
+      pos_mean_all = c(pos_mean_all, pos_mean)
+    }
+    
+    df.out$pos_mean = pos_mean_all
+  }
+  
+  df.out = cbind(df.out, temp)
+  return(df.out)
+}
 
 
 
@@ -608,10 +658,10 @@ plot_ldl_by_variants <-  function(variants_g1, variants_g2, plot_title, df.v2p, 
 
 v2p_to_p2v <- function(df.v2p){
   temp2 = c()
-  ind = which(df.v2p$patient != "")
+  ind = which(df.v2p$carriers != "")
   pb = txtProgressBar(min = 0, max = nrow(df.v2p), initial = 0) 
   for (i in ind){
-    patient_ids = unlist(strsplit(df.v2p$patient[i], split = "\\|"))
+    patient_ids = unlist(strsplit(df.v2p$carriers[i], split = "\\|"))
     temp = data.frame(patient = patient_ids, variant = df.v2p$variant[i])
     temp2 = rbind(temp2, temp)
     setTxtProgressBar(pb,i)
@@ -631,6 +681,7 @@ v2p_to_p2v <- function(df.v2p){
   close(pb)
   return(df.p2v)
 }
+
 
 read_ssv <- function(fname, AF_thres=NA){
   require(tidyverse)
@@ -761,7 +812,7 @@ add_blosum_funsum <- function(df.NSFP, df.blosum, df.funsum){
   return(df.NSFP)
 }
 
-de_noise_ss <- function(df, pos_mean_method, df.funsum, ls.funsum_ss, include_LOF = T){
+de_noise_ss_1gene <- function(df, pos_mean_method, df.funsum, ls.funsum_ss, dss_path, include_LOF = T, show_func_class=F){
   # filter out row without amino acid changes
   ind = which(!is.na(df$aaref) & !is.na(df$aaalt))
   df = df[ind,]
@@ -827,6 +878,17 @@ de_noise_ss <- function(df, pos_mean_method, df.funsum, ls.funsum_ss, include_LO
     dplyr::slice(rep(1:n(), each = length(aa_list)))
   df.out$aaalt = rep(aa_list, nrow(df.pos_score))
   
+  # assign functional class
+  if (show_func_class){
+    df.out$functional_class = NA
+    ind = which(df.out$aaref != df.out$aaalt & df.out$aaalt != '*')
+    df.out$functional_class[ind] = "MIS"
+    ind = which(df.out$aaref != "*" & df.out$aaalt == "*")
+    df.out$functional_class[ind] = "LOF"
+    ind = which(df.out$aaref == df.out$aaalt)
+    df.out$functional_class[ind] = "SYN"
+  }
+  
   # assign norm_score, pos_score, sub_score to df.out
   df.out$gene_aa_str = paste0(df.out$gene, "---", df.out$aaref, df.out$aapos, df.out$aaalt)
   df.out$gene_aapos = paste0(df.out$gene, "---", df.out$aapos)
@@ -835,6 +897,128 @@ de_noise_ss <- function(df, pos_mean_method, df.funsum, ls.funsum_ss, include_LO
   # add dssp SS annotation
   require(ptm)
   df.out$ss = NA
+  df.out$acc = NA
+  df.dssp = parse.dssp(file = dss_path, keepfiles = T)
+  ind = match(df.out$aapos, table = df.dssp$respdb)
+  df.out$ss = df.dssp$ss[ind]
+  df.out$acc = df.dssp$sasa[ind]
+  
+  ind = match(df.out$gene_aa_str, table = df$gene_aa_str)
+  df.out$raw_score = df$raw_score[ind]
+  df.out$norm_raw_score = df$norm_raw_score[ind]
+  ind = match(df.out$gene_aapos, table = df.pos_score$gene_aapos)
+  df.out$pos_score = df.pos_score$pos_mean[ind]
+  ind = match(df.out$aa_pair, table = df.sub_tb$aa_pair)
+  df.out$sub_score = df.sub_tb$score[ind]
+  
+  ss_list = c("G" = "Helices", "H" = "Helices", "I" = "Helices", 
+              "E" = "Strands", "B" = "Strands", 
+              "T" = "Loops", "S" = "Loops", "C" = "Loops")
+  df.out$sub_score_ss = NA
+  for (ss in names(ss_list)){
+    ind = which(df.out$ss == ss)
+    if (length(ind)){
+      df.sub_tb = funsum_to_subTable(ls.funsum_ss[[ss]]) #convert FUNSUM to tabular format
+      ind2 = match(df.out$aa_pair[ind], table = df.sub_tb$aa_pair)
+      df.out$sub_score_ss[ind] = df.sub_tb$score[ind2]
+    }
+  }
+  
+  df.out$final_score = df.out$pos_score + df.out$sub_score
+  df.out$final_score_ss = df.out$pos_score + df.out$sub_score_ss
+  ind = which(is.na(df.out$final_score_ss))
+  df.out$final_score_ss[ind] = df.out$final_score[ind]
+  df.out$sub_score_ss[ind] = df.out$sub_score[ind]
+  
+  return(df.out)
+}
+
+de_noise_ss <- function(df, pos_mean_method, df.funsum, ls.funsum_ss, include_LOF = T, show_func_class=F){
+  # filter out row without amino acid changes
+  ind = which(!is.na(df$aaref) & !is.na(df$aaalt))
+  df = df[ind,]
+  
+  if (include_LOF){
+    aa_list = unlist(strsplit("RHKDESTNQCGPAVILMFYW*", split = ""))
+  } else {
+    aa_list = unlist(strsplit("RHKDESTNQCGPAVILMFYW", split = ""))
+    ind = which((df$aaref != "*") & (df$aaalt != "*"))
+    df = df[ind,]
+  }
+  df.sub_tb = funsum_to_subTable(df.funsum) #convert FUNSUM to tabular format
+  if (is.null(df[["gene"]])){
+    df[["gene"]] = "gene"
+  }
+  df$gene_aa_str = paste0(df$gene, "---", df$aaref, df$aapos, df$aaalt)
+  
+  # collapse rows with the same amino acid substitutions
+  df = df %>% group_by(gene_aa_str) %>%
+    summarise(gene = unique(gene), aapos = unique(aapos), aaref = unique(aaref), aaalt = unique(aaalt), 
+              raw_score = mean(raw_score), norm_raw_score = mean(norm_raw_score))
+  
+  ## calculate positional component
+  df.pos_score = df %>% group_by(gene, aapos) %>% summarise(aaref = unique(aaref), pos_mean = NA)
+  df.pos_score$gene_aapos = paste0(df.pos_score$gene, "---", df.pos_score$aapos)
+  
+  temp = matrix(NA, nrow = nrow(df.pos_score), ncol = length(aa_list))
+  colnames(temp) <- aa_list
+  if (pos_mean_method == "funsum"){
+    temp2 = matrix(NA, nrow = nrow(df.pos_score), ncol = length(aa_list))
+    colnames(temp2) <- aa_list
+  }
+  
+  pb = txtProgressBar(min = 1, max = nrow(df.pos_score), initial = 1, style = 3) 
+  for (i in 1:nrow(df.pos_score)){
+    ind = which(df$gene == df.pos_score$gene[i] & df$aapos == df.pos_score$aapos[i])
+    ind2 = df$aaalt[ind] %in% aa_list
+    temp[i, df$aaalt[ind[ind2]]] = df$norm_raw_score[ind[ind2]]
+    
+    # calculate pos_mean by funsum method
+    if (pos_mean_method == "funsum"){
+      ind = which(!is.na(temp[i,]))
+      temp2[i,ind] = temp[i,ind] - df.funsum[df.pos_score$aaref[i], aa_list[ind]]
+    }
+    
+    setTxtProgressBar(pb,i)
+  }
+  close(pb)
+  
+  # calculate pos_mean by other methods
+  if (pos_mean_method == "mean"){
+    df.pos_score$pos_mean = rowMeans(temp, na.rm = T)
+  } else if (pos_mean_method == "median"){
+    df.pos_score$pos_mean = apply(temp, 1, FUN = median, na.rm = T)
+  } else if (pos_mean_method == "js"){
+    df.pos_score$pos_mean = get_js(t(temp))
+  } else if (pos_mean_method == "funsum"){
+    df.pos_score$pos_mean = get_js(t(temp2))
+  }
+  
+  ## construct a new df with all possible substitutions
+  df.out = df.pos_score %>% select(gene, aapos, aaref) %>% 
+    dplyr::slice(rep(1:n(), each = length(aa_list)))
+  df.out$aaalt = rep(aa_list, nrow(df.pos_score))
+  
+  # assign functional class
+  if (show_func_class){
+    df.out$functional_class = NA
+    ind = which(df.out$aaref != df.out$aaalt & df.out$aaalt != '*')
+    df.out$functional_class[ind] = "MIS"
+    ind = which(df.out$aaref != "*" & df.out$aaalt == "*")
+    df.out$functional_class[ind] = "LOF"
+    ind = which(df.out$aaref == df.out$aaalt)
+    df.out$functional_class[ind] = "SYN"
+  }
+  
+  # assign norm_score, pos_score, sub_score to df.out
+  df.out$gene_aa_str = paste0(df.out$gene, "---", df.out$aaref, df.out$aapos, df.out$aaalt)
+  df.out$gene_aapos = paste0(df.out$gene, "---", df.out$aapos)
+  df.out$aa_pair = paste0(df.out$aaref, df.out$aaalt)
+  
+  # add dssp SS annotation
+  require(ptm)
+  df.out$ss = NA
+  df.out$acc = NA
   for (gene in unique(df.out$gene)){
     df.dssp = parse.dssp(file = paste0("./alphaFold/dssp_out/", gene, ".dss"), keepfiles = T)
     df.dssp$gene_aapos = paste0(gene, "---", df.dssp$respdb)
@@ -1044,11 +1228,11 @@ draw_variant_ggplot_v2 <- function(df.NSFP, score_type, score_type_name=score_ty
   pval_str = "No test"
   if (test == "KS"){
     pval = get_KS_pval(x = df.NSFP[[score_type]][ind], y = df.NSFP[[score_type]][ind2])
-    pval_str = paste0("KS p=", format(pval, digits=2))
+    pval_str = paste0("KS p=", format(as.numeric(as.character(pval)), digits=2))
     print(pval_str)
   } else if (test == "MW"){
     pval = get_MW_pval(x = df.NSFP[[score_type]][ind], y = df.NSFP[[score_type]][ind2])
-    pval_str = paste0("MW p=", format(pval, digits=2))
+    pval_str = paste0("MW p=", format(as.numeric(as.character(pval)), digits=2))
     print(pval_str)
   }
   
@@ -1075,11 +1259,11 @@ draw_patient_ggplot <- function(df.p2v, score_type, score_type_name=score_type, 
   pval_str = "No test"
   if (test == "KS"){
     pval = get_KS_pval(x = df.p2v[[score_type]][ind], y = df.p2v[[score_type]][ind2])
-    pval_str = paste0("KS p=", format(pval, digits=2))
+    pval_str = paste0("KS p=", format(as.numeric(as.character(pval)), digits=2))
     print(pval_str)
   } else if (test == "MW"){
     pval = get_MW_pval(x = df.p2v[[score_type]][ind], y = df.p2v[[score_type]][ind2])
-    pval_str = paste0("MW p=", format(pval, digits=2))
+    pval_str = paste0("MW p=", format(as.numeric(as.character(pval)), digits=2))
     print(pval_str)
   }
   
@@ -1094,6 +1278,44 @@ draw_patient_ggplot <- function(df.p2v, score_type, score_type_name=score_type, 
     geom_label(label=paste0("N=", n_g2), x=max(x_range-abs(x_range[2]-x_range[1])*0.02), y=ymax*0.02, color = "red", fill="white", hjust=1, vjust=0, label.size=NA) +
     theme_ipsum(base_family = "Arial", plot_title_size = 14, axis_title_size = 12, axis_title_face = "bold", axis_title_just = "c", plot_margin = margin(10, 10, 10, 10)) + 
     ggtitle(score_type_name) + theme(plot.title = element_text(hjust = 0.5), legend.position = legend_pos, legend.background = element_rect(fill = "white", color = "white"), legend.box.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"))
+  
+  return(plt)
+}
+
+
+draw_patient_ggplot_v2 <- function(df.p2v, score_type, score_type_name=score_type, phenotype_col = "cancer", legend_labels = c('No cancer', 'Cancer'), ymax = 1, bw = 0.2, x_range = c(-5, 5), show_legend = F, legend_pos = c(0.3, 0.9), test="KS"){
+  require(hrbrthemes)
+  ind = which(df.p2v[[phenotype_col]] == 0)
+  ind2 = which(df.p2v[[phenotype_col]] == 1)
+  
+  pval_str = "No test"
+  if (test == "KS"){
+    pval = get_KS_pval(x = df.p2v[[score_type]][ind], y = df.p2v[[score_type]][ind2])
+    pval_str = paste0("KS p=", format(as.numeric(as.character(pval)), digits=2))
+    print(pval_str)
+  } else if (test == "MW"){
+    pval = get_MW_pval(x = df.p2v[[score_type]][ind], y = df.p2v[[score_type]][ind2])
+    pval_str = paste0("MW p=", format(as.numeric(as.character(pval)), digits=2))
+    print(pval_str)
+  }
+  
+  n_g1 = length(which(!is.na(df.p2v[[score_type]][ind])))
+  n_g2 = length(which(!is.na(df.p2v[[score_type]][ind2])))
+  plt <- df.p2v %>% filter(!is.na(get(phenotype_col)) & !is.na(get(score_type))) %>% 
+    ggplot(aes(x=get(score_type), group=get(phenotype_col), fill=get(phenotype_col))) + geom_density(alpha=0.5, show.legend = show_legend, bw = bw) + 
+    scale_x_continuous(name="Functional score", limits=x_range) + scale_y_continuous(name="Density", limits=c(0,ymax)) + 
+    scale_fill_manual(values = c("blue", "red"), name = NULL, labels=legend_labels) + 
+    geom_label(label=pval_str, x=max(x_range)-abs(x_range[2]-x_range[1])*0.02, y=ymax*0.99, color = "black", fill="white", hjust=1, vjust=1, label.size=NA) + 
+    geom_label(label=paste0("N=", n_g1), x=min(x_range+abs(x_range[2]-x_range[1])*0.02), y=ymax*0.02, color = "blue", fill="white", hjust=0, vjust=0, label.size=NA) + 
+    geom_label(label=paste0("N=", n_g2), x=max(x_range-abs(x_range[2]-x_range[1])*0.02), y=ymax*0.02, color = "red", fill="white", hjust=1, vjust=0, label.size=NA) +
+    theme_ipsum(base_family = "Arial", plot_title_size = 14, axis_title_size = 12, axis_title_face = "bold", axis_title_just = "c", plot_margin = margin(10, 10, 10, 10)) + 
+    ggtitle(score_type_name) + 
+    theme(plot.title = element_text(hjust = 0.5), 
+          legend.position = legend_pos, 
+          legend.text = element_text(margin = margin(t = 0, r = 0, b = 0, l = 0)),
+          legend.background = element_rect(fill = "white", color = "white"), 
+          legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+          legend.box.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"))
   
   return(plt)
 }
@@ -2062,7 +2284,7 @@ prepare_dfNSFP_aggregate <- function(df.clinvar = NULL, include_LOF=T){
 
 
 
-draw_FUNSUM_heatmap <- function(df.funsum, title_str="FUNSUM", include_LOF=F, show_diag=T){
+draw_FUNSUM_heatmap <- function(df.funsum, title_str="FUNSUM", include_LOF=F, show_diag=T, aa_colored=T){
   require(tidyverse)
   require(hrbrthemes)
   
@@ -2097,9 +2319,12 @@ draw_FUNSUM_heatmap <- function(df.funsum, title_str="FUNSUM", include_LOF=F, sh
     guides(fill = guide_colourbar(barwidth = 0.5, barheight = 10)) + 
     labs(title=title_str, x ="Reference amino acid", y = "Alternative amino acid") + 
     xlim(aa_order) + ylim(aa_order) + 
-    theme_ipsum() +
-    theme(axis.text = element_text(colour = aa_col))
+    theme_ipsum(axis_title_size=12, plot_title_size=15)
   
+  if (aa_colored){
+    plt.funsum = plt.funsum + theme(axis.text = element_text(colour = aa_col))
+  }
+
   return(plt.funsum)
 }
 
@@ -2135,10 +2360,11 @@ load_maveDB_csv <- function(file_path){
   return(df.out)
 }
 
-draw_score_distribution_ggplot <- function(df, score_type = "raw_score"){
+draw_score_distribution_ggplot <- function(df, score_type = "raw_score", bin_ct = 30){
   require(ggridges)
+  
   plt = df %>% ggplot(aes(x=.data[[score_type]], y=functional_class, fill=functional_class)) +
-    geom_density_ridges(alpha=0.6, stat="binline") + ylab("") + xlab(score_type) +  
+    geom_density_ridges(alpha=0.6, stat="binline", bins = bin_ct) + ylab("") + xlab(score_type) +  
     theme_ridges()
   return(plt)
 }
@@ -2221,6 +2447,7 @@ normalize_scoreset <- function(df, lower_bound = 0.05, upper_bound = 0.95, force
 }
 
 
+
 clinvar_align_aapos <- function(df_gene, df.clinvar_gene, test_range = c(-5, 5), diagnose=F){
   require(tidyverse)
   df.align_res = c()
@@ -2255,6 +2482,7 @@ clinvar_align_aapos <- function(df_gene, df.clinvar_gene, test_range = c(-5, 5),
     return(pos_diff[ind][1])
   }
 }
+
 
 
 
